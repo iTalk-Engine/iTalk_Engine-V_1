@@ -1,62 +1,95 @@
+from flask import Flask, request, jsonify
+from flask_socketio import SocketIO, emit
 from Engine.core import ItalkEngine
 from Engine.extensions import ExtensionManager
+from dotenv import load_dotenv
+import os
 
+# --- Charger les variables d'environnement ---
+load_dotenv()  # lit le fichier .env
+SECRET_KEY = os.getenv("SECRET_KEY", "default_secret")  # fallback si non défini
 
-# --- Callbacks principaux ---
+app = Flask(__name__)
+app.config['SECRET_KEY'] = SECRET_KEY
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# --- Initialisation du moteur ---
+engine = ItalkEngine()
+
+# --- Callbacks du moteur ---
 def on_user_connected(user):
-    """Appelé quand un utilisateur se connecte."""
-    print(f"[Système] {user.username} vient de se connecter !")
-
+    print(f"[Système] {user.username} connecté")
+    socketio.emit('user_connected', {'id': user.id, 'username': user.username})
 
 def on_user_disconnected(user):
-    """Appelé quand un utilisateur se déconnecte."""
-    print(f"[Système] {user.username} s'est déconnecté.")
-
+    print(f"[Système] {user.username} déconnecté")
+    socketio.emit('user_disconnected', {'id': user.id})
 
 def on_message(user, message):
-    """Appelé lorsqu'un message est reçu."""
     print(f"[{message.timestamp}] {user.username} : {message.content}")
+    socketio.emit('new_message', {
+        'user_id': user.id,
+        'username': user.username,
+        'content': message.content,
+        'timestamp': message.timestamp
+    })
 
+engine.on("on_connect", on_user_connected)
+engine.on("on_disconnect", on_user_disconnected)
+engine.on("on_message", on_message)
 
-# --- Fonction d'initialisation du moteur ---
-def init_engine():
-    """
-    Initialise le moteur iTalk Engine et abonne les callbacks aux événements.
-    Retourne l'instance du moteur prête à l'emploi.
-    """
-    engine = ItalkEngine()
-
-    # --- Gestion des extensions (optionnel) ---
-    # extension_manager = ExtensionManager(engine)
-    # extension_manager.load_extensions()
-
-    # --- Abonnement aux événements ---
-    event_callbacks = {
-        "on_connect": on_user_connected,
-        "on_disconnect": on_user_disconnected,
-        "on_message": on_message
-    }
-    for event, callback in event_callbacks.items():
-        engine.on(event, callback)
-
-    return engine
-
-
-# --- Simulation d'une session utilisateur ---
-def simulate_session(engine):
+# --- Routes HTTP ---
+@app.route("/register", methods=["POST"])
+def register():
+    data = request.json or {}
+    user_id = data.get("id")
+    username = data.get("username")
+    if not user_id or not username:
+        return jsonify({"error": "id et username requis"}), 400
     try:
-        user = engine.connect_user("1", "Jallow")
-        engine.send_message("1", "Salut tout le monde !")
-        engine.disconnect_user("1")
+        user = engine.register_user(user_id, username)
+        return jsonify({"status": "ok", "user": {"id": user.id, "username": user.username}})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-        # Sauvegarde automatique si nécessaire
-        # engine.save_state()
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.json or {}
+    user_id = data.get("id")
+    username = data.get("username")
+    if not user_id or not username:
+        return jsonify({"error": "id et username requis"}), 400
+    try:
+        user = engine.connect_user(user_id, username)
+        return jsonify({"status": "connecté", "user": {"id": user.id, "username": user.username}})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    except Exception as exc:
-        print(f"[ERREUR] Exception non gérée : {exc}")
+@app.route("/logout", methods=["POST"])
+def logout():
+    data = request.json or {}
+    user_id = data.get("id")
+    if not user_id:
+        return jsonify({"error": "id requis"}), 400
+    try:
+        engine.disconnect_user(user_id)
+        return jsonify({"status": "déconnecté", "user_id": user_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
+# --- SocketIO Events ---
+@socketio.on('send_message')
+def handle_send_message(data):
+    user_id = data.get('id')
+    content = data.get('content')
+    if not user_id or not content:
+        emit('error', {'error': 'id et content requis'})
+        return
+    try:
+        engine.send_message(user_id, content)
+    except Exception as e:
+        emit('error', {'error': str(e)})
 
-# --- Point d'entrée ---
+# --- Lancement du serveur ---
 if __name__ == "__main__":
-    engine = init_engine()
-    simulate_session(engine)
+    socketio.run(app, host="0.0.0.0", port=25568, debug=True)
